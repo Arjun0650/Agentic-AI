@@ -7,6 +7,7 @@ langchain
 langchain-core
 langchain-google-genai
 langserve
+sse-starlette
 
 google-generativeai
 google-genai
