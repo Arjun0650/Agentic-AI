@@ -7,12 +7,10 @@ import chromadb
 import uvicorn
 
 from fastapi import FastAPI
-from langserve import add_routes
-
-from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 from langchain_core.tools import tool
-from langchain_core.runnables import RunnableLambda
 from langchain_google_genai import (
     ChatGoogleGenerativeAI,
     GoogleGenerativeAIEmbeddings,
@@ -29,9 +27,8 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     raise ValueError(
         "GOOGLE_API_KEY is missing. "
-        "Add it in Render > Environment Variables."
+        "Add it in Render Environment Variables."
     )
-
 
 DB_PATH = "schedule.db"
 CHROMA_PATH = "./chroma_schedule"
@@ -43,14 +40,11 @@ COLLECTION_NAME = "schedule_events"
 # ============================================================
 
 def get_connection():
-
     conn = sqlite3.connect(
         DB_PATH,
         check_same_thread=False
     )
-
     conn.row_factory = sqlite3.Row
-
     return conn
 
 
@@ -79,16 +73,11 @@ def initialize_database():
         "SELECT COUNT(*) FROM events"
     ).fetchone()[0]
 
-    # --------------------------------------------------------
-    # Generate sample schedule for next 30 days
-    # --------------------------------------------------------
-
     if count == 0:
 
         today = date.today()
 
         sample_events = [
-
             {
                 "title": "Team Meeting",
                 "description": "Weekly project discussion with the team.",
@@ -97,7 +86,6 @@ def initialize_database():
                 "end_time": "11:00",
                 "location": "Conference Room",
             },
-
             {
                 "title": "AI Workshop",
                 "description": "Artificial Intelligence and Machine Learning workshop.",
@@ -106,7 +94,6 @@ def initialize_database():
                 "end_time": "16:00",
                 "location": "AI Lab",
             },
-
             {
                 "title": "Project Development",
                 "description": "Work on Agentic RAG Schedule Assistant.",
@@ -115,7 +102,6 @@ def initialize_database():
                 "end_time": "11:00",
                 "location": "Home",
             },
-
             {
                 "title": "Doctor Appointment",
                 "description": "Regular medical appointment.",
@@ -124,16 +110,14 @@ def initialize_database():
                 "end_time": "17:00",
                 "location": "City Hospital",
             },
-
             {
                 "title": "Client Meeting",
-                "description": "Discuss client requirements and project progress.",
+                "description": "Discuss client requirements and progress.",
                 "event_type": "meeting",
                 "start_time": "15:00",
                 "end_time": "16:00",
                 "location": "Online",
             },
-
             {
                 "title": "Python Practice",
                 "description": "Practice Python programming and algorithms.",
@@ -150,7 +134,7 @@ def initialize_database():
                 today + timedelta(days=day_number)
             ).isoformat()
 
-            item = sample_events[
+            first = sample_events[
                 day_number % len(sample_events)
             ]
 
@@ -166,16 +150,15 @@ def initialize_database():
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
-                item["title"],
-                item["description"],
-                item["event_type"],
+                first["title"],
+                first["description"],
+                first["event_type"],
                 event_date,
-                item["start_time"],
-                item["end_time"],
-                item["location"],
+                first["start_time"],
+                first["end_time"],
+                first["location"],
             ))
 
-            # Add second event every third day
             if day_number % 3 == 0:
 
                 second = sample_events[
@@ -326,11 +309,9 @@ def rebuild_vector_store():
     global collection
 
     try:
-
         chroma_client.delete_collection(
             COLLECTION_NAME
         )
-
     except Exception:
         pass
 
@@ -356,24 +337,12 @@ def rebuild_vector_store():
         )
 
         metadatas.append({
-
-            "event_id":
-                int(event["id"]),
-
-            "title":
-                event["title"],
-
-            "date":
-                event["date"],
-
-            "start_time":
-                event["start_time"],
-
-            "end_time":
-                event["end_time"],
-
-            "event_type":
-                event["event_type"],
+            "event_id": int(event["id"]),
+            "title": event["title"],
+            "date": event["date"],
+            "start_time": event["start_time"],
+            "end_time": event["end_time"],
+            "event_type": event["event_type"],
         })
 
     embeddings = (
@@ -390,7 +359,6 @@ def rebuild_vector_store():
     )
 
 
-# Create RAG index when app starts
 rebuild_vector_store()
 
 
@@ -398,9 +366,7 @@ rebuild_vector_store()
 # 6. DATE HELPERS
 # ============================================================
 
-def get_next_weekday(
-    weekday_number
-):
+def get_next_weekday(weekday_number):
 
     today = date.today()
 
@@ -418,9 +384,7 @@ def get_next_weekday(
     )
 
 
-def extract_date_from_query(
-    query
-):
+def extract_date_from_query(query):
 
     query = query.lower()
 
@@ -438,7 +402,6 @@ def extract_date_from_query(
         return today.isoformat()
 
     weekdays = {
-
         "monday": 0,
         "tuesday": 1,
         "wednesday": 2,
@@ -448,9 +411,7 @@ def extract_date_from_query(
         "sunday": 6,
     }
 
-    for weekday, number in (
-        weekdays.items()
-    ):
+    for weekday, number in weekdays.items():
 
         if weekday in query:
 
@@ -472,16 +433,14 @@ def semantic_search(
     limit=8
 ):
 
-    collection_count = (
-        collection.count()
-    )
+    count = collection.count()
 
-    if collection_count == 0:
+    if count == 0:
         return []
 
     limit = min(
         limit,
-        collection_count
+        count
     )
 
     query_embedding = (
@@ -491,11 +450,9 @@ def semantic_search(
     )
 
     results = collection.query(
-
         query_embeddings=[
             query_embedding
         ],
-
         n_results=limit
     )
 
@@ -517,38 +474,26 @@ def semantic_search(
     ):
 
         output.append({
-
-            "document":
-                document,
-
-            "metadata":
-                metadata,
+            "document": document,
+            "metadata": metadata,
         })
 
     return output
 
 
 # ============================================================
-# 8. TOOL 1 — get_schedule
+# 8. TOOL 1 — GET SCHEDULE
 # ============================================================
 
 @tool
-def get_schedule(
-    query: str
-) -> str:
+def get_schedule(query: str) -> str:
     """
     Retrieve relevant schedule information.
 
     Use this for:
-    - today
-    - tomorrow
-    - weekdays
-    - meetings
-    - workshops
-    - tasks
-    - appointments
-    - availability
-    - semantic schedule search
+    today, tomorrow, weekdays, meetings,
+    workshops, tasks, appointments,
+    availability checks and semantic schedule search.
     """
 
     query_lower = query.lower()
@@ -559,53 +504,39 @@ def get_schedule(
         )
     )
 
-    # --------------------------------------------------------
-    # Exact date search
-    # --------------------------------------------------------
-
     if target_date:
 
         events = get_events_by_date(
             target_date
         )
 
-        # Filter by type
-
         if "meeting" in query_lower:
 
             events = [
                 e for e in events
-                if e["event_type"]
-                == "meeting"
+                if e["event_type"] == "meeting"
             ]
 
         elif "workshop" in query_lower:
 
             events = [
                 e for e in events
-                if e["event_type"]
-                == "workshop"
+                if e["event_type"] == "workshop"
             ]
 
         elif "appointment" in query_lower:
 
             events = [
                 e for e in events
-                if e["event_type"]
-                == "appointment"
+                if e["event_type"] == "appointment"
             ]
 
         elif "task" in query_lower:
 
             events = [
                 e for e in events
-                if e["event_type"]
-                == "task"
+                if e["event_type"] == "task"
             ]
-
-        # ----------------------------------------------------
-        # Time period filtering
-        # ----------------------------------------------------
 
         if "morning" in query_lower:
 
@@ -636,49 +567,27 @@ def get_schedule(
             ]
 
         return json.dumps({
-
             "success": True,
-
-            "query":
-                query,
-
-            "date":
-                target_date,
-
-            "count":
-                len(events),
-
-            "events":
-                events,
-
+            "query": query,
+            "date": target_date,
+            "count": len(events),
+            "events": events,
         }, indent=2)
-
-    # --------------------------------------------------------
-    # RAG search
-    # --------------------------------------------------------
 
     rag_results = semantic_search(
         query
     )
 
     return json.dumps({
-
         "success": True,
-
-        "query":
-            query,
-
-        "retrieval":
-            "ChromaDB semantic RAG",
-
-        "results":
-            rag_results,
-
+        "query": query,
+        "retrieval": "ChromaDB semantic RAG",
+        "results": rag_results,
     }, indent=2)
 
 
 # ============================================================
-# 9. TOOL 2 — update_schedule
+# 9. TOOL 2 — UPDATE SCHEDULE
 # ============================================================
 
 @tool
@@ -694,7 +603,7 @@ def update_schedule(
     event_id: int = 0,
 ) -> str:
     """
-    Add, update, or delete schedule entries.
+    Add, update or delete schedule entries.
 
     action must be:
     add
@@ -706,43 +615,27 @@ def update_schedule(
 
     conn = get_connection()
 
-    # ========================================================
+    # --------------------------------------------------------
     # ADD
-    # ========================================================
+    # --------------------------------------------------------
 
     if action == "add":
 
         if not title:
-
             conn.close()
-
-            return (
-                "ERROR: title is required."
-            )
+            return "ERROR: title is required."
 
         if not event_date:
-
             conn.close()
-
-            return (
-                "ERROR: event_date is required."
-            )
+            return "ERROR: event_date is required."
 
         if not start_time:
-
             conn.close()
-
-            return (
-                "ERROR: start_time is required."
-            )
+            return "ERROR: start_time is required."
 
         if not end_time:
-
             conn.close()
-
-            return (
-                "ERROR: end_time is required."
-            )
+            return "ERROR: end_time is required."
 
         if not event_type:
             event_type = "meeting"
@@ -774,9 +667,7 @@ def update_schedule(
 
         conn.commit()
 
-        new_id = (
-            cursor.lastrowid
-        )
+        new_id = cursor.lastrowid
 
         conn.close()
 
@@ -787,23 +678,15 @@ def update_schedule(
         )
 
         return json.dumps({
-
             "success": True,
-
-            "action":
-                "add",
-
-            "message":
-                "Event added successfully.",
-
-            "event":
-                event,
-
+            "action": "add",
+            "message": "Event added successfully.",
+            "event": event,
         }, indent=2)
 
-    # ========================================================
+    # --------------------------------------------------------
     # UPDATE
-    # ========================================================
+    # --------------------------------------------------------
 
     elif action == "update":
 
@@ -829,95 +712,48 @@ def update_schedule(
 
             conn.close()
 
-            return (
-                "ERROR: Event not found."
-            )
+            return "ERROR: Event not found."
 
         fields = []
         values = []
 
         if title:
-
-            fields.append(
-                "title = ?"
-            )
-
-            values.append(
-                title
-            )
+            fields.append("title = ?")
+            values.append(title)
 
         if description:
-
-            fields.append(
-                "description = ?"
-            )
-
-            values.append(
-                description
-            )
+            fields.append("description = ?")
+            values.append(description)
 
         if event_type:
-
-            fields.append(
-                "event_type = ?"
-            )
-
-            values.append(
-                event_type
-            )
+            fields.append("event_type = ?")
+            values.append(event_type)
 
         if event_date:
-
-            fields.append(
-                "date = ?"
-            )
-
-            values.append(
-                event_date
-            )
+            fields.append("date = ?")
+            values.append(event_date)
 
         if start_time:
-
-            fields.append(
-                "start_time = ?"
-            )
-
-            values.append(
-                start_time
-            )
+            fields.append("start_time = ?")
+            values.append(start_time)
 
         if end_time:
-
-            fields.append(
-                "end_time = ?"
-            )
-
-            values.append(
-                end_time
-            )
+            fields.append("end_time = ?")
+            values.append(end_time)
 
         if location:
-
-            fields.append(
-                "location = ?"
-            )
-
-            values.append(
-                location
-            )
+            fields.append("location = ?")
+            values.append(location)
 
         if not fields:
 
             conn.close()
 
             return (
-                "ERROR: No update "
-                "values provided."
+                "ERROR: No update values provided."
             )
 
-        values.append(
-            event_id
-        )
+        values.append(event_id)
 
         sql = (
             "UPDATE events SET "
@@ -935,30 +771,20 @@ def update_schedule(
 
         rebuild_vector_store()
 
-        updated = (
-            get_event_by_id(
-                event_id
-            )
+        updated = get_event_by_id(
+            event_id
         )
 
         return json.dumps({
-
             "success": True,
-
-            "action":
-                "update",
-
-            "message":
-                "Event updated successfully.",
-
-            "event":
-                updated,
-
+            "action": "update",
+            "message": "Event updated successfully.",
+            "event": updated,
         }, indent=2)
 
-    # ========================================================
+    # --------------------------------------------------------
     # DELETE
-    # ========================================================
+    # --------------------------------------------------------
 
     elif action == "delete":
 
@@ -985,22 +811,17 @@ def update_schedule(
         rebuild_vector_store()
 
         return json.dumps({
-
             "success": True,
-
-            "action":
-                "delete",
-
+            "action": "delete",
             "message":
                 f"Event {event_id} deleted successfully."
-
         }, indent=2)
 
     conn.close()
 
     return (
         "ERROR: Invalid action. "
-        "Use add, update, or delete."
+        "Use add, update or delete."
     )
 
 
@@ -1009,11 +830,8 @@ def update_schedule(
 # ============================================================
 
 tools = [
-
     get_schedule,
-
     update_schedule
-
 ]
 
 
@@ -1022,18 +840,14 @@ tools = [
 # ============================================================
 
 llm = ChatGoogleGenerativeAI(
-
     model="gemini-2.5-flash",
-
-    google_api_key=
-        GOOGLE_API_KEY,
-
+    google_api_key=GOOGLE_API_KEY,
     temperature=0
 )
 
 
 # ============================================================
-# 12. AGENT SYSTEM PROMPT
+# 12. SYSTEM PROMPT
 # ============================================================
 
 SYSTEM_PROMPT = f"""
@@ -1054,12 +868,12 @@ Use get_schedule whenever the user asks:
 - What do I have scheduled?
 - What do I have tomorrow?
 - What meetings do I have?
-- What workshops are coming?
+- What workshops do I have?
 - Do I have an appointment?
 - Am I free?
 - Am I available?
-- Find a schedule event.
 - Search my schedule.
+- Find an event.
 
 2. update_schedule
 
@@ -1075,23 +889,23 @@ Use update_schedule whenever the user asks:
 - Update an event.
 - Delete an event.
 
-IMPORTANT:
+IMPORTANT RULES:
 
-If the user wants to move, update, or delete an existing
-event and you do not know its event ID:
+If the user wants to move, update or delete an existing
+event and you do not know the event ID:
 
-FIRST use get_schedule.
+FIRST call get_schedule.
 
-Then identify the correct event ID.
+Identify the correct event.
 
 THEN call update_schedule.
 
-Never invent an event.
+Never invent schedule information.
 
 Always retrieve schedule information before answering
-questions about the user's schedule.
+questions about the schedule.
 
-Understand dates such as:
+Understand:
 
 today
 tomorrow
@@ -1118,18 +932,16 @@ use:
 start_time = 15:00
 end_time = 16:00
 
-When checking availability:
+When checking availability,
+use get_schedule first.
 
-FIRST call get_schedule.
-
-If there are no events during that period,
+If there are no events in the requested period,
 say that the user appears free.
 
-After adding, updating, or deleting,
+After adding, updating or deleting,
 clearly confirm what changed.
 
-Return a normal human-readable final answer.
-Do NOT return only "...".
+Return a normal readable response.
 """
 
 
@@ -1138,338 +950,708 @@ Do NOT return only "...".
 # ============================================================
 
 agent = create_agent(
-
     model=llm,
-
     tools=tools,
-
-    system_prompt=
-        SYSTEM_PROMPT
+    system_prompt=SYSTEM_PROMPT
 )
 
 
 # ============================================================
-# 14. LANGSERVE INPUT
+# 14. RESPONSE EXTRACTION
 # ============================================================
 
-class AgentInput(BaseModel):
+def extract_text(content):
 
-    input: str = Field(
-
-        description=
-            "Message to the Agentic RAG Schedule Assistant"
-
-    )
-
-
-# ============================================================
-# 15. FIXED AGENT EXECUTION
-# ============================================================
-
-def get_content_text(content):
-
-    # Standard text
-    if isinstance(
-        content,
-        str
-    ):
-
+    if isinstance(content, str):
         return content.strip()
 
-    # Gemini content blocks
-    if isinstance(
-        content,
-        list
-    ):
+    if isinstance(content, list):
 
-        text_parts = []
+        parts = []
 
         for block in content:
 
-            if isinstance(
-                block,
-                str
-            ):
+            if isinstance(block, str):
 
-                text_parts.append(
-                    block
-                )
+                parts.append(block)
 
-            elif isinstance(
-                block,
-                dict
-            ):
+            elif isinstance(block, dict):
 
-                text = block.get(
-                    "text"
-                )
+                text = block.get("text")
 
                 if text:
+                    parts.append(str(text))
 
-                    text_parts.append(
-                        str(text)
-                    )
-
-        return "\n".join(
-            text_parts
-        ).strip()
+        return "\n".join(parts).strip()
 
     if content is None:
-
         return ""
 
-    return str(
-        content
-    ).strip()
+    return str(content).strip()
 
 
-def run_schedule_agent(x):
+def extract_final_response(result):
 
-    # --------------------------------------------------------
-    # Extract user input
-    # --------------------------------------------------------
+    if not isinstance(result, dict):
+        return str(result)
 
-    if isinstance(
-        x,
-        dict
-    ):
+    messages = result.get(
+        "messages",
+        []
+    )
 
-        user_input = x.get(
-            "input",
+    for message in reversed(messages):
+
+        message_type = getattr(
+            message,
+            "type",
             ""
         )
 
-    else:
-
-        user_input = getattr(
-            x,
-            "input",
-            str(x)
+        content = getattr(
+            message,
+            "content",
+            None
         )
 
-    # --------------------------------------------------------
-    # Execute agent
-    # --------------------------------------------------------
-
-    result = agent.invoke({
-
-        "messages": [
-
-            {
-                "role": "user",
-                "content": user_input
-            }
-
-        ]
-
-    })
-
-    # --------------------------------------------------------
-    # Find final AI answer
-    # --------------------------------------------------------
-
-    if isinstance(
-        result,
-        dict
-    ):
-
-        messages = result.get(
-            "messages",
-            []
+        text = extract_text(
+            content
         )
 
-        # Search backwards for AI response
-        for message in reversed(
-            messages
+        if (
+            message_type in [
+                "ai",
+                "assistant"
+            ]
+            and text
+            and text != "..."
         ):
+            return text
 
-            message_type = getattr(
-                message,
-                "type",
-                ""
-            )
+    for message in reversed(messages):
 
-            content = getattr(
-                message,
-                "content",
-                None
-            )
+        content = getattr(
+            message,
+            "content",
+            None
+        )
 
-            text = get_content_text(
-                content
-            )
+        text = extract_text(
+            content
+        )
 
-            if (
-                message_type
-                in [
-                    "ai",
-                    "assistant"
-                ]
-                and text
-                and text != "..."
-            ):
-
-                return text
-
-        # ----------------------------------------------------
-        # Fallback
-        # ----------------------------------------------------
-
-        for message in reversed(
-            messages
-        ):
-
-            content = getattr(
-                message,
-                "content",
-                None
-            )
-
-            text = get_content_text(
-                content
-            )
-
-            if (
-                text
-                and text != "..."
-            ):
-
-                return text
-
-    # --------------------------------------------------------
-    # Absolute fallback
-    # --------------------------------------------------------
+        if text and text != "...":
+            return text
 
     return (
-        "The schedule request was processed, "
-        "but no readable final response was returned."
+        "The request was processed, "
+        "but the model returned no readable response."
     )
 
 
 # ============================================================
-# 16. LANGSERVE RUNNABLE
-# ============================================================
-
-formatted_agent = (
-
-    RunnableLambda(
-        run_schedule_agent
-    )
-
-).with_types(
-
-    input_type=
-        AgentInput,
-
-    output_type=
-        str
-)
-
-
-# ============================================================
-# 17. FASTAPI
+# 15. FASTAPI
 # ============================================================
 
 app = FastAPI(
-
-    title=
-        "Agentic RAG Schedule Assistant",
-
-    description=
-        "AI schedule management using Gemini, "
-        "SQLite and ChromaDB RAG.",
-
-    version=
-        "1.0.0"
+    title="Agentic RAG Schedule Assistant",
+    description=(
+        "AI schedule management using "
+        "Gemini, ChromaDB and SQLite."
+    ),
+    version="1.0.0"
 )
 
 
 # ============================================================
-# 18. HOME
+# 16. REQUEST MODEL
 # ============================================================
 
-@app.get("/")
-def home():
-
-    return {
-
-        "status":
-            "running",
-
-        "application":
-            "Agentic RAG Schedule Assistant",
-
-        "health":
-            "/health",
-
-        "playground":
-            "/agent/playground/",
-
-        "docs":
-            "/docs"
-    }
+class ChatRequest(BaseModel):
+    message: str
 
 
 # ============================================================
-# 19. HEALTH CHECK
+# 17. CHAT ENDPOINT
+# ============================================================
+
+@app.post("/chat")
+def chat(request: ChatRequest):
+
+    try:
+
+        result = agent.invoke({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": request.message
+                }
+            ]
+        })
+
+        response_text = (
+            extract_final_response(
+                result
+            )
+        )
+
+        return {
+            "success": True,
+            "response": response_text
+        }
+
+    except Exception as e:
+
+        print(
+            "CHAT ERROR:",
+            repr(e)
+        )
+
+        return {
+            "success": False,
+            "response":
+                f"Error: {str(e)}"
+        }
+
+
+# ============================================================
+# 18. HEALTH ENDPOINT
 # ============================================================
 
 @app.get("/health")
 def health():
 
     return {
-
-        "status":
-            "healthy",
-
-        "database":
-            "SQLite",
-
-        "vector_database":
-            "ChromaDB",
-
-        "rag":
-            True,
-
+        "status": "healthy",
+        "application":
+            "Agentic RAG Schedule Assistant",
+        "database": "SQLite",
+        "vector_database": "ChromaDB",
+        "rag": True,
         "tools": [
-
             "get_schedule",
-
             "update_schedule"
-
         ],
-
         "total_events":
-            len(
-                get_all_events()
-            )
+            len(get_all_events())
     }
 
 
 # ============================================================
-# 20. LANGSERVE ROUTES
+# 19. WEB INTERFACE
 # ============================================================
 
-add_routes(
+@app.get("/", response_class=HTMLResponse)
+def home():
 
-    app,
+    return """
+<!DOCTYPE html>
 
-    formatted_agent,
+<html lang="en">
 
-    path="/agent",
+<head>
 
-    playground_type="default"
-)
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>
+Agentic RAG Schedule Assistant
+</title>
+
+
+<style>
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+
+    margin: 0;
+
+    font-family:
+        Arial,
+        Helvetica,
+        sans-serif;
+
+    background:
+        linear-gradient(
+            135deg,
+            #06182f,
+            #123d69
+        );
+
+    min-height: 100vh;
+
+    display: flex;
+
+    justify-content: center;
+
+    align-items: center;
+}
+
+
+.app {
+
+    width: 94%;
+
+    max-width: 900px;
+
+    height: 90vh;
+
+    background: white;
+
+    border-radius: 22px;
+
+    overflow: hidden;
+
+    display: flex;
+
+    flex-direction: column;
+
+    box-shadow:
+        0 25px 80px
+        rgba(0,0,0,.35);
+}
+
+
+.header {
+
+    background: #071d38;
+
+    color: white;
+
+    padding: 25px 30px;
+}
+
+
+.header h1 {
+
+    margin: 0;
+
+    font-size: 28px;
+}
+
+
+.header p {
+
+    margin:
+        8px 0 0;
+
+    opacity: .75;
+}
+
+
+.status {
+
+    display: inline-block;
+
+    margin-top: 13px;
+
+    background:
+        rgba(
+            255,
+            255,
+            255,
+            .12
+        );
+
+    padding:
+        6px 12px;
+
+    border-radius: 20px;
+
+    font-size: 12px;
+}
+
+
+.chat {
+
+    flex: 1;
+
+    overflow-y: auto;
+
+    background: #f4f7fb;
+
+    padding: 25px;
+}
+
+
+.message {
+
+    max-width: 78%;
+
+    margin-bottom: 15px;
+
+    padding:
+        14px 18px;
+
+    border-radius: 16px;
+
+    line-height: 1.5;
+
+    white-space: pre-wrap;
+}
+
+
+.bot {
+
+    background: white;
+
+    color: #172033;
+
+    border:
+        1px solid #e2e7ee;
+}
+
+
+.user {
+
+    margin-left: auto;
+
+    background: #0b315c;
+
+    color: white;
+}
+
+
+.input-area {
+
+    display: flex;
+
+    gap: 10px;
+
+    padding: 18px;
+
+    border-top:
+        1px solid #e1e5eb;
+}
+
+
+input {
+
+    flex: 1;
+
+    padding:
+        15px 17px;
+
+    border:
+        1px solid #ccd3dd;
+
+    border-radius: 12px;
+
+    font-size: 16px;
+
+    outline: none;
+}
+
+
+input:focus {
+
+    border-color: #154f88;
+}
+
+
+button {
+
+    border: none;
+
+    border-radius: 12px;
+
+    padding:
+        0 25px;
+
+    background: #0b315c;
+
+    color: white;
+
+    cursor: pointer;
+
+    font-size: 15px;
+}
+
+
+button:hover {
+
+    background: #164f87;
+}
+
+
+button:disabled {
+
+    opacity: .6;
+
+    cursor: not-allowed;
+}
+
+
+@media(max-width:600px) {
+
+    .app {
+
+        width: 100%;
+
+        height: 100vh;
+
+        border-radius: 0;
+    }
+
+
+    .message {
+
+        max-width: 90%;
+    }
+
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<div class="app">
+
+
+<div class="header">
+
+<h1>
+Agentic RAG Schedule Assistant
+</h1>
+
+<p>
+Gemini • ChromaDB RAG • SQLite
+</p>
+
+<div class="status">
+● Agent Online
+</div>
+
+</div>
+
+
+<div
+    class="chat"
+    id="chat"
+>
+
+<div class="message bot">
+
+Hello! I can manage your schedule for the next 30 days.
+
+Try asking:
+
+• What do I have scheduled tomorrow?
+• Am I free Friday afternoon?
+• Add a meeting tomorrow at 3 PM.
+• Move my meeting from 3 PM to 4 PM.
+
+</div>
+
+</div>
+
+
+<div class="input-area">
+
+<input
+    id="input"
+    placeholder="Ask about your schedule..."
+    onkeydown="handleEnter(event)"
+>
+
+<button
+    id="sendButton"
+    onclick="sendMessage()"
+>
+Send
+</button>
+
+</div>
+
+
+</div>
+
+
+<script>
+
+function handleEnter(event) {
+
+    if (
+        event.key === "Enter"
+    ) {
+
+        sendMessage();
+
+    }
+
+}
+
+
+function addMessage(
+    text,
+    type
+) {
+
+    const chat =
+        document.getElementById(
+            "chat"
+        );
+
+    const message =
+        document.createElement(
+            "div"
+        );
+
+    message.className =
+        "message " + type;
+
+    message.textContent =
+        text;
+
+    chat.appendChild(
+        message
+    );
+
+    chat.scrollTop =
+        chat.scrollHeight;
+
+    return message;
+}
+
+
+async function sendMessage() {
+
+    const input =
+        document.getElementById(
+            "input"
+        );
+
+    const button =
+        document.getElementById(
+            "sendButton"
+        );
+
+    const message =
+        input.value.trim();
+
+    if (!message) {
+        return;
+    }
+
+
+    addMessage(
+        message,
+        "user"
+    );
+
+
+    input.value = "";
+
+    button.disabled = true;
+
+
+    const thinking =
+        addMessage(
+            "Thinking...",
+            "bot"
+        );
+
+
+    try {
+
+        const response =
+            await fetch(
+                "/chat",
+                {
+
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body:
+                        JSON.stringify(
+                            {
+                                message:
+                                    message
+                            }
+                        )
+                }
+            );
+
+
+        const data =
+            await response.json();
+
+
+        thinking.remove();
+
+
+        if (
+            data.success
+        ) {
+
+            addMessage(
+                data.response,
+                "bot"
+            );
+
+        }
+
+        else {
+
+            addMessage(
+                data.response ||
+                "Something went wrong.",
+                "bot"
+            );
+
+        }
+
+    }
+
+    catch (error) {
+
+        thinking.remove();
+
+        addMessage(
+            "Unable to contact the agent.",
+            "bot"
+        );
+
+    }
+
+
+    button.disabled = false;
+
+    input.focus();
+
+}
+
+</script>
+
+
+</body>
+
+</html>
+"""
 
 
 # ============================================================
-# 21. LOCAL / RENDER SERVER
+# 20. RENDER / LOCAL START
 # ============================================================
 
 if __name__ == "__main__":
 
     port = int(
-
         os.environ.get(
             "PORT",
             8000
@@ -1477,10 +1659,7 @@ if __name__ == "__main__":
     )
 
     uvicorn.run(
-
         app,
-
         host="0.0.0.0",
-
         port=port
     )
