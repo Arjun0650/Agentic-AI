@@ -1,7 +1,10 @@
 import os
 import json
 import sqlite3
-from datetime import date, timedelta
+import hashlib
+import math
+import re
+from datetime import date, datetime, timedelta
 
 import chromadb
 import uvicorn
@@ -10,14 +13,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from chromadb.utils import embedding_functions
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import create_agent
 
 
 # ============================================================
-# CONFIG
+# 1. CONFIGURATION
 # ============================================================
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -25,24 +27,34 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     raise ValueError(
         "GOOGLE_API_KEY is missing. "
-        "Add it in Render Environment Variables."
+        "Add GOOGLE_API_KEY in Render Environment Variables."
     )
+
 
 DB_PATH = "schedule.db"
 CHROMA_PATH = "./chroma_schedule"
 COLLECTION_NAME = "schedule_events"
 
+# Very small local vectors.
+# No Gemini embedding API.
+# No ONNX model.
+# No large model download.
+EMBEDDING_SIZE = 128
+
 
 # ============================================================
-# SQLITE DATABASE
+# 2. SQLITE DATABASE
 # ============================================================
 
 def get_connection():
+
     conn = sqlite3.connect(
         DB_PATH,
         check_same_thread=False
     )
+
     conn.row_factory = sqlite3.Row
+
     return conn
 
 
@@ -71,60 +83,74 @@ def initialize_database():
         "SELECT COUNT(*) FROM events"
     ).fetchone()[0]
 
+    # --------------------------------------------------------
+    # Create sample data only once
+    # --------------------------------------------------------
+
     if count == 0:
 
         today = date.today()
 
         templates = [
+
             {
                 "title": "Team Meeting",
-                "description": "Weekly project discussion with the team.",
+                "description": "Weekly project discussion with the development team.",
                 "event_type": "meeting",
                 "start_time": "10:00",
                 "end_time": "11:00",
-                "location": "Conference Room",
+                "location": "Conference Room"
             },
+
             {
                 "title": "AI Workshop",
                 "description": "Artificial Intelligence and Machine Learning workshop.",
                 "event_type": "workshop",
                 "start_time": "14:00",
                 "end_time": "16:00",
-                "location": "AI Lab",
+                "location": "AI Lab"
             },
+
             {
                 "title": "Project Development",
-                "description": "Work on Agentic RAG Schedule Assistant.",
+                "description": "Development work for the Agentic RAG Schedule Assistant.",
                 "event_type": "task",
                 "start_time": "09:00",
                 "end_time": "11:00",
-                "location": "Home",
+                "location": "Home"
             },
+
             {
                 "title": "Doctor Appointment",
-                "description": "Regular medical appointment.",
+                "description": "Regular doctor appointment.",
                 "event_type": "appointment",
                 "start_time": "16:00",
                 "end_time": "17:00",
-                "location": "City Hospital",
+                "location": "City Hospital"
             },
+
             {
                 "title": "Client Meeting",
-                "description": "Discuss project requirements and progress.",
+                "description": "Discuss project requirements and progress with the client.",
                 "event_type": "meeting",
                 "start_time": "15:00",
                 "end_time": "16:00",
-                "location": "Online",
+                "location": "Online"
             },
+
             {
                 "title": "Python Practice",
-                "description": "Practice Python and data structures.",
+                "description": "Practice Python programming and data structures.",
                 "event_type": "task",
                 "start_time": "18:00",
                 "end_time": "19:00",
-                "location": "Home",
-            },
+                "location": "Home"
+            }
         ]
+
+        # ----------------------------------------------------
+        # Generate events for the next 30 days
+        # ----------------------------------------------------
 
         for i in range(30):
 
@@ -154,14 +180,14 @@ def initialize_database():
                 event_date,
                 first["start_time"],
                 first["end_time"],
-                first["location"],
+                first["location"]
             ))
 
+            # Add a second event every third day
             if i % 3 == 0:
 
                 second = templates[
-                    (i + 2)
-                    % len(templates)
+                    (i + 2) % len(templates)
                 ]
 
                 conn.execute("""
@@ -182,7 +208,7 @@ def initialize_database():
                     event_date,
                     second["start_time"],
                     second["end_time"],
-                    second["location"],
+                    second["location"]
                 ))
 
         conn.commit()
@@ -190,11 +216,8 @@ def initialize_database():
     conn.close()
 
 
-initialize_database()
-
-
 # ============================================================
-# DATABASE HELPERS
+# 3. DATABASE HELPERS
 # ============================================================
 
 def get_all_events():
@@ -230,11 +253,7 @@ def get_event_by_id(event_id):
 
     conn.close()
 
-    return (
-        dict(row)
-        if row
-        else None
-    )
+    return dict(row) if row else None
 
 
 def get_events_by_date(event_date):
@@ -259,30 +278,109 @@ def get_events_by_date(event_date):
     ]
 
 
+def event_exists(event_id):
+
+    conn = get_connection()
+
+    row = conn.execute("""
+        SELECT id
+        FROM events
+        WHERE id = ?
+        AND status = 'scheduled'
+    """, (
+        event_id,
+    )).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
 # ============================================================
-# CHROMADB — LOCAL EMBEDDINGS
+# 4. INITIALIZE SQLITE
 # ============================================================
 
-local_embedding_function = (
-    embedding_functions.DefaultEmbeddingFunction()
-)
+initialize_database()
 
-chroma_client = (
-    chromadb.PersistentClient(
-        path=CHROMA_PATH
+
+# ============================================================
+# 5. LIGHTWEIGHT LOCAL EMBEDDING
+# ============================================================
+
+def lightweight_embedding(text: str):
+
+    """
+    Small feature-hashing embedding.
+
+    IMPORTANT:
+    - No Gemini API call
+    - No ONNX
+    - No HuggingFace
+    - No model download
+    - Very low RAM use
+    """
+
+    vector = [
+        0.0
+    ] * EMBEDDING_SIZE
+
+    words = re.findall(
+        r"[a-zA-Z0-9]+",
+        text.lower()
     )
+
+    for word in words:
+
+        digest = hashlib.md5(
+            word.encode("utf-8")
+        ).hexdigest()
+
+        index = (
+            int(
+                digest[:8],
+                16
+            )
+            % EMBEDDING_SIZE
+        )
+
+        vector[index] += 1.0
+
+    # Normalize vector
+
+    norm = math.sqrt(
+        sum(
+            value * value
+            for value in vector
+        )
+    )
+
+    if norm > 0:
+
+        vector = [
+            value / norm
+            for value in vector
+        ]
+
+    return vector
+
+
+# ============================================================
+# 6. CHROMADB
+# ============================================================
+
+chroma_client = chromadb.PersistentClient(
+    path=CHROMA_PATH
 )
 
 
 def get_collection():
 
-    return (
-        chroma_client
-        .get_or_create_collection(
-            name=COLLECTION_NAME,
-            embedding_function=
-                local_embedding_function
-        )
+    # We always supply our own embeddings.
+    # Chroma therefore does NOT need to download
+    # its default ONNX model.
+
+    return chroma_client.get_or_create_collection(
+        name=COLLECTION_NAME
     )
 
 
@@ -308,11 +406,15 @@ def rebuild_vector_store():
 
     global collection
 
+    # Delete old collection
     try:
+
         chroma_client.delete_collection(
             COLLECTION_NAME
         )
+
     except Exception:
+
         pass
 
     collection = get_collection()
@@ -322,18 +424,27 @@ def rebuild_vector_store():
     if not events:
         return
 
-    documents = [
-        event_to_document(event)
-        for event in events
-    ]
+    documents = []
+    ids = []
+    metadatas = []
+    embeddings = []
 
-    ids = [
-        str(event["id"])
-        for event in events
-    ]
+    for event in events:
 
-    metadatas = [
-        {
+        document = event_to_document(
+            event
+        )
+
+        documents.append(
+            document
+        )
+
+        ids.append(
+            str(event["id"])
+        )
+
+        metadatas.append({
+
             "event_id":
                 int(event["id"]),
 
@@ -350,23 +461,33 @@ def rebuild_vector_store():
                 event["end_time"],
 
             "event_type":
-                event["event_type"],
-        }
-        for event in events
-    ]
+                event["event_type"]
+        })
+
+        embeddings.append(
+            lightweight_embedding(
+                document
+            )
+        )
+
+    # IMPORTANT:
+    # Embeddings are supplied manually.
+    # Chroma does NOT call its ONNX embedding model.
 
     collection.add(
         ids=ids,
         documents=documents,
-        metadatas=metadatas
+        metadatas=metadatas,
+        embeddings=embeddings
     )
 
 
+# Build RAG database
 rebuild_vector_store()
 
 
 # ============================================================
-# DATE HELPERS
+# 7. DATE HELPERS
 # ============================================================
 
 def next_weekday(
@@ -395,38 +516,71 @@ def extract_date_from_query(
     query
 ):
 
-    query = query.lower()
+    query_lower = query.lower()
 
     today = date.today()
 
-    if "tomorrow" in query:
+    # --------------------------------------------------------
+    # Today
+    # --------------------------------------------------------
+
+    if "today" in query_lower:
+
+        return today.isoformat()
+
+    # --------------------------------------------------------
+    # Tomorrow
+    # --------------------------------------------------------
+
+    if "tomorrow" in query_lower:
 
         return (
             today
             + timedelta(days=1)
         ).isoformat()
 
-    if "today" in query:
+    # --------------------------------------------------------
+    # YYYY-MM-DD
+    # --------------------------------------------------------
 
-        return (
-            today.isoformat()
-        )
+    iso_match = re.search(
+        r"\b(\d{4}-\d{2}-\d{2})\b",
+        query
+    )
+
+    if iso_match:
+
+        try:
+
+            parsed = datetime.strptime(
+                iso_match.group(1),
+                "%Y-%m-%d"
+            ).date()
+
+            return parsed.isoformat()
+
+        except ValueError:
+
+            pass
+
+    # --------------------------------------------------------
+    # Weekday
+    # --------------------------------------------------------
 
     weekdays = {
+
         "monday": 0,
         "tuesday": 1,
         "wednesday": 2,
         "thursday": 3,
         "friday": 4,
         "saturday": 5,
-        "sunday": 6,
+        "sunday": 6
     }
 
-    for name, number in (
-        weekdays.items()
-    ):
+    for name, number in weekdays.items():
 
-        if name in query:
+        if name in query_lower:
 
             return (
                 next_weekday(
@@ -434,11 +588,78 @@ def extract_date_from_query(
                 )
             ).isoformat()
 
+    # --------------------------------------------------------
+    # Month name + day
+    # Example: August 15
+    # --------------------------------------------------------
+
+    month_names = {
+
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12
+    }
+
+    for month_name, month_number in (
+        month_names.items()
+    ):
+
+        pattern = (
+            rf"\b{month_name}\s+"
+            rf"(\d{{1,2}})\b"
+        )
+
+        match = re.search(
+            pattern,
+            query_lower
+        )
+
+        if match:
+
+            day_number = int(
+                match.group(1)
+            )
+
+            year = today.year
+
+            try:
+
+                candidate = date(
+                    year,
+                    month_number,
+                    day_number
+                )
+
+                # If that date already passed,
+                # use next year.
+                if candidate < today:
+
+                    candidate = date(
+                        year + 1,
+                        month_number,
+                        day_number
+                    )
+
+                return candidate.isoformat()
+
+            except ValueError:
+
+                return None
+
     return None
 
 
 # ============================================================
-# RAG SEARCH
+# 8. CHROMADB RAG SEARCH
 # ============================================================
 
 def semantic_search(
@@ -449,6 +670,7 @@ def semantic_search(
     count = collection.count()
 
     if count == 0:
+
         return []
 
     limit = min(
@@ -456,8 +678,20 @@ def semantic_search(
         count
     )
 
+    # Create query vector locally
+    query_vector = lightweight_embedding(
+        query
+    )
+
+    # IMPORTANT:
+    # query_embeddings is used instead of query_texts.
+    # This prevents Chroma from invoking its default
+    # ONNX embedding model.
+
     results = collection.query(
-        query_texts=[query],
+        query_embeddings=[
+            query_vector
+        ],
         n_results=limit
     )
 
@@ -471,35 +705,71 @@ def semantic_search(
         [[]]
     )[0]
 
+    distances = results.get(
+        "distances",
+        [[]]
+    )[0]
+
     output = []
 
-    for document, metadata in zip(
-        documents,
-        metadatas
+    for index, document in enumerate(
+        documents
     ):
 
-        output.append({
+        metadata = {}
+
+        if index < len(metadatas):
+
+            metadata = (
+                metadatas[index]
+                or {}
+            )
+
+        item = {
+
             "document":
                 document,
 
             "metadata":
-                metadata,
-        })
+                metadata
+        }
+
+        if index < len(distances):
+
+            item["distance"] = (
+                distances[index]
+            )
+
+        output.append(
+            item
+        )
 
     return output
 
 
 # ============================================================
-# TOOL 1 — GET SCHEDULE
+# 9. TOOL 1 — GET SCHEDULE
 # ============================================================
 
 @tool
 def get_schedule(
     query: str
 ) -> str:
+
     """
-    Retrieve schedule information based on date,
-    time, availability, event type, or natural-language query.
+    Retrieve relevant schedule information.
+
+    Use this tool for:
+    - today's schedule
+    - tomorrow's schedule
+    - weekday schedules
+    - explicit dates
+    - meetings
+    - workshops
+    - tasks
+    - appointments
+    - availability checks
+    - natural-language RAG searches
     """
 
     query_lower = query.lower()
@@ -510,108 +780,130 @@ def get_schedule(
         )
     )
 
-    # Exact date retrieval
+    # ========================================================
+    # DATE-BASED RETRIEVAL
+    # ========================================================
+
     if target_date:
 
         events = get_events_by_date(
             target_date
         )
 
+        # ----------------------------------------------------
+        # Event type filters
+        # ----------------------------------------------------
+
         if "meeting" in query_lower:
 
             events = [
-                e for e in events
-                if e["event_type"]
+                event
+                for event in events
+                if event["event_type"]
                 == "meeting"
             ]
 
         elif "workshop" in query_lower:
 
             events = [
-                e for e in events
-                if e["event_type"]
+                event
+                for event in events
+                if event["event_type"]
                 == "workshop"
             ]
 
         elif "appointment" in query_lower:
 
             events = [
-                e for e in events
-                if e["event_type"]
+                event
+                for event in events
+                if event["event_type"]
                 == "appointment"
             ]
 
         elif "task" in query_lower:
 
             events = [
-                e for e in events
-                if e["event_type"]
+                event
+                for event in events
+                if event["event_type"]
                 == "task"
             ]
+
+        # ----------------------------------------------------
+        # Time of day filters
+        # ----------------------------------------------------
 
         if "morning" in query_lower:
 
             events = [
-                e for e in events
-                if
-                "06:00"
-                <= e["start_time"]
-                < "12:00"
+                event
+                for event in events
+                if (
+                    "06:00"
+                    <= event["start_time"]
+                    < "12:00"
+                )
             ]
 
         elif "afternoon" in query_lower:
 
             events = [
-                e for e in events
-                if
-                "12:00"
-                <= e["start_time"]
-                < "17:00"
+                event
+                for event in events
+                if (
+                    "12:00"
+                    <= event["start_time"]
+                    < "17:00"
+                )
             ]
 
         elif "evening" in query_lower:
 
             events = [
-                e for e in events
-                if e["start_time"]
-                >= "17:00"
+                event
+                for event in events
+                if (
+                    event["start_time"]
+                    >= "17:00"
+                )
             ]
 
-        return json.dumps({
-            "success":
-                True,
-
-            "date":
-                target_date,
-
-            "count":
-                len(events),
-
-            "events":
-                events,
-        }, indent=2)
-
-    # Semantic RAG retrieval
-    rag_results = (
-        semantic_search(
-            query
+        return json.dumps(
+            {
+                "success": True,
+                "retrieval_type":
+                    "SQLite exact schedule retrieval",
+                "query": query,
+                "date": target_date,
+                "count": len(events),
+                "events": events
+            },
+            indent=2
         )
+
+    # ========================================================
+    # RAG RETRIEVAL
+    # ========================================================
+
+    rag_results = semantic_search(
+        query
     )
 
-    return json.dumps({
-        "success":
-            True,
-
-        "retrieval":
-            "ChromaDB semantic RAG",
-
-        "results":
-            rag_results,
-    }, indent=2)
+    return json.dumps(
+        {
+            "success": True,
+            "retrieval_type":
+                "ChromaDB vector RAG",
+            "query": query,
+            "results": rag_results
+        },
+        indent=2
+    )
 
 
 # ============================================================
-# TOOL 2 — UPDATE SCHEDULE
+# 10. TOOL 2 — UPDATE SCHEDULE
 # ============================================================
 
 @tool
@@ -624,22 +916,29 @@ def update_schedule(
     start_time: str = "",
     end_time: str = "",
     location: str = "",
-    event_id: int = 0,
+    event_id: int = 0
 ) -> str:
+
     """
     Add, update, or delete schedule entries.
 
     action must be:
-    add
-    update
-    delete
+    - add
+    - update
+    - delete
+
+    For update/delete operations, use get_schedule first
+    when the event ID is not known.
     """
 
     action = action.lower().strip()
 
     conn = get_connection()
 
+    # ========================================================
     # ADD
+    # ========================================================
+
     if action == "add":
 
         if not title:
@@ -700,7 +999,7 @@ def update_schedule(
             event_date,
             start_time,
             end_time,
-            location,
+            location
         ))
 
         conn.commit()
@@ -711,25 +1010,28 @@ def update_schedule(
 
         conn.close()
 
+        # Keep Chroma synchronized
         rebuild_vector_store()
 
-        return json.dumps({
-            "success":
-                True,
+        event = get_event_by_id(
+            new_id
+        )
 
-            "action":
-                "add",
+        return json.dumps(
+            {
+                "success": True,
+                "action": "add",
+                "message":
+                    "Event added successfully.",
+                "event": event
+            },
+            indent=2
+        )
 
-            "message":
-                "Event added successfully.",
-
-            "event":
-                get_event_by_id(
-                    new_id
-                ),
-        }, indent=2)
-
+    # ========================================================
     # UPDATE
+    # ========================================================
+
     if action == "update":
 
         if not event_id:
@@ -738,7 +1040,8 @@ def update_schedule(
 
             return (
                 "ERROR: event_id is required. "
-                "Use get_schedule first."
+                "Use get_schedule first to find "
+                "the correct event."
             )
 
         existing = conn.execute("""
@@ -755,7 +1058,8 @@ def update_schedule(
             conn.close()
 
             return (
-                "ERROR: Event not found."
+                f"ERROR: scheduled event "
+                f"{event_id} was not found."
             )
 
         fields = []
@@ -836,17 +1140,22 @@ def update_schedule(
             conn.close()
 
             return (
-                "ERROR: No update values provided."
+                "ERROR: no update values "
+                "were provided."
             )
 
         values.append(
             event_id
         )
 
-        conn.execute(
+        sql = (
             "UPDATE events SET "
             + ", ".join(fields)
-            + " WHERE id = ?",
+            + " WHERE id = ?"
+        )
+
+        conn.execute(
+            sql,
             values
         )
 
@@ -854,25 +1163,28 @@ def update_schedule(
 
         conn.close()
 
+        # Keep Chroma synchronized
         rebuild_vector_store()
 
-        return json.dumps({
-            "success":
-                True,
+        updated = get_event_by_id(
+            event_id
+        )
 
-            "action":
-                "update",
+        return json.dumps(
+            {
+                "success": True,
+                "action": "update",
+                "message":
+                    "Event updated successfully.",
+                "event": updated
+            },
+            indent=2
+        )
 
-            "message":
-                "Event updated successfully.",
-
-            "event":
-                get_event_by_id(
-                    event_id
-                ),
-        }, indent=2)
-
+    # ========================================================
     # DELETE
+    # ========================================================
+
     if action == "delete":
 
         if not event_id:
@@ -882,6 +1194,24 @@ def update_schedule(
             return (
                 "ERROR: event_id is required. "
                 "Use get_schedule first."
+            )
+
+        existing = conn.execute("""
+            SELECT *
+            FROM events
+            WHERE id = ?
+            AND status = 'scheduled'
+        """, (
+            event_id,
+        )).fetchone()
+
+        if not existing:
+
+            conn.close()
+
+            return (
+                f"ERROR: scheduled event "
+                f"{event_id} was not found."
             )
 
         conn.execute("""
@@ -896,29 +1226,29 @@ def update_schedule(
 
         conn.close()
 
+        # Keep Chroma synchronized
         rebuild_vector_store()
 
-        return json.dumps({
-            "success":
-                True,
-
-            "action":
-                "delete",
-
-            "message":
-                f"Event {event_id} deleted successfully."
-        }, indent=2)
+        return json.dumps(
+            {
+                "success": True,
+                "action": "delete",
+                "message":
+                    f"Event {event_id} deleted successfully."
+            },
+            indent=2
+        )
 
     conn.close()
 
     return (
-        "ERROR: Invalid action. "
+        "ERROR: invalid action. "
         "Use add, update, or delete."
     )
 
 
 # ============================================================
-# EXACTLY TWO REQUIRED TOOLS
+# 11. EXACTLY TWO REQUIRED TOOLS
 # ============================================================
 
 tools = [
@@ -928,39 +1258,40 @@ tools = [
 
 
 # ============================================================
-# GEMINI MODEL
+# 12. GEMINI AGENT MODEL
 # ============================================================
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.6-flash",
-    google_api_key=
-        GOOGLE_API_KEY,
+    google_api_key=GOOGLE_API_KEY,
     temperature=0
 )
 
 
 # ============================================================
-# AGENT PROMPT
+# 13. AGENT PROMPT
 # ============================================================
 
 SYSTEM_PROMPT = f"""
 You are an intelligent Agentic RAG Schedule Assistant.
 
-Today's date is:
-
+TODAY'S DATE:
 {date.today().isoformat()}
 
-You manage the user's schedule for the next 30 days.
+Your job is to manage the user's schedule for the
+next 30 days.
 
 You have EXACTLY TWO tools.
 
-TOOL 1:
-get_schedule
+============================================================
+TOOL 1: get_schedule
+============================================================
 
-Use get_schedule when the user asks:
+Use get_schedule whenever the user asks:
 
 - What do I have scheduled?
 - What do I have tomorrow?
+- What do I have today?
 - What meetings do I have?
 - What workshops do I have?
 - What appointments do I have?
@@ -969,11 +1300,16 @@ Use get_schedule when the user asks:
 - Am I available?
 - Find an event.
 - Search my schedule.
+- What is happening on a certain date?
 
-TOOL 2:
-update_schedule
+get_schedule performs database retrieval and
+ChromaDB vector RAG retrieval.
 
-Use update_schedule when the user asks:
+============================================================
+TOOL 2: update_schedule
+============================================================
+
+Use update_schedule whenever the user asks:
 
 - Add an event.
 - Add a meeting.
@@ -985,82 +1321,103 @@ Use update_schedule when the user asks:
 - Update an event.
 - Delete an event.
 
-IMPORTANT:
+============================================================
+IMPORTANT RULES
+============================================================
 
-For updates, moves, and deletes:
+1. Never invent schedule information.
 
-FIRST call get_schedule.
+2. Always use get_schedule before answering a question
+   about the user's schedule.
 
-Find the correct event and its event ID.
+3. When the user wants to MOVE, UPDATE or DELETE an
+   existing event:
 
-THEN call update_schedule.
+   FIRST call get_schedule.
 
-Never invent schedule events.
+   Find the correct event and its event ID.
 
-Understand:
+   THEN call update_schedule.
 
-today
-tomorrow
-Monday
-Tuesday
-Wednesday
-Thursday
-Friday
-Saturday
-Sunday
+4. Understand natural-language dates:
 
-Convert times:
+   today
+   tomorrow
+   Monday
+   Tuesday
+   Wednesday
+   Thursday
+   Friday
+   Saturday
+   Sunday
+   August 15
+   YYYY-MM-DD
 
-3 PM = 15:00
-4 PM = 16:00
-10 AM = 10:00
+5. Convert times to 24-hour HH:MM format.
 
-If the user says:
+   3 PM = 15:00
+   4 PM = 16:00
+   10 AM = 10:00
 
-"3 PM for one hour"
+6. If the user says:
 
-use:
+   "3 PM for one hour"
 
-start_time = 15:00
-end_time = 16:00
+   use:
 
-For availability questions:
+   start_time = 15:00
+   end_time = 16:00
 
-FIRST use get_schedule.
+7. If moving an event, preserve the event duration
+   unless the user explicitly changes the duration.
 
-If there are no events during that period,
-say that the user appears free.
+8. For availability questions:
 
-After adding, updating, or deleting an event,
-clearly confirm what happened.
+   FIRST call get_schedule.
 
-Return a normal concise human-readable response.
+   If no event overlaps the requested period,
+   clearly say the user appears free.
+
+9. After adding, updating, or deleting an event,
+   clearly confirm what changed.
+
+10. Give short, natural, human-readable answers.
+
+11. Do not output raw tool JSON unless necessary.
+
+12. Do not answer only with "...".
 """
 
 
 # ============================================================
-# CREATE AGENT
+# 14. CREATE AGENT
 # ============================================================
 
 agent = create_agent(
     model=llm,
     tools=tools,
-    system_prompt=
-        SYSTEM_PROMPT
+    system_prompt=SYSTEM_PROMPT
 )
 
 
 # ============================================================
-# RESPONSE EXTRACTION
+# 15. RESPONSE EXTRACTION
 # ============================================================
 
-def extract_text(content):
+def extract_text(
+    content
+):
+
+    # Normal text response
 
     if isinstance(
         content,
         str
     ):
+
         return content.strip()
+
+    # Gemini may return content blocks
 
     if isinstance(
         content,
@@ -1117,12 +1474,16 @@ def extract_final_response(
         dict
     ):
 
-        return str(result)
+        return str(
+            result
+        )
 
     messages = result.get(
         "messages",
         []
     )
+
+    # Search from the end for final AI response
 
     for message in reversed(
         messages
@@ -1156,32 +1517,63 @@ def extract_final_response(
 
             return text
 
+    # Secondary fallback
+
+    for message in reversed(
+        messages
+    ):
+
+        content = getattr(
+            message,
+            "content",
+            None
+        )
+
+        text = extract_text(
+            content
+        )
+
+        if (
+            text
+            and text != "..."
+        ):
+
+            return text
+
     return (
-        "The agent processed the request, "
+        "The schedule request was processed, "
         "but no readable response was returned."
     )
 
 
 # ============================================================
-# FASTAPI APP
+# 16. FASTAPI
 # ============================================================
 
 app = FastAPI(
     title=
         "Agentic RAG Schedule Assistant",
+    description=
+        "Agentic schedule manager using Gemini, "
+        "SQLite and ChromaDB vector RAG.",
     version=
         "1.0.0"
 )
 
 
+# ============================================================
+# 17. CHAT REQUEST
+# ============================================================
+
 class ChatRequest(
     BaseModel
 ):
+
     message: str
 
 
 # ============================================================
-# CHAT API
+# 18. CHAT API
 # ============================================================
 
 @app.post("/chat")
@@ -1191,33 +1583,39 @@ def chat(
 
     try:
 
-        result = agent.invoke({
-            "messages": [
-                {
-                    "role":
-                        "user",
+        result = agent.invoke(
+            {
+                "messages": [
+                    {
+                        "role":
+                            "user",
 
-                    "content":
-                        request.message
-                }
-            ]
-        })
+                        "content":
+                            request.message
+                    }
+                ]
+            }
+        )
+
+        final_response = (
+            extract_final_response(
+                result
+            )
+        )
 
         return {
             "success":
                 True,
 
             "response":
-                extract_final_response(
-                    result
-                )
+                final_response
         }
 
-    except Exception as e:
+    except Exception as error:
 
         print(
             "CHAT ERROR:",
-            repr(e)
+            repr(error)
         )
 
         return {
@@ -1225,20 +1623,24 @@ def chat(
                 False,
 
             "response":
-                f"Error: {str(e)}"
+                f"Error: {str(error)}"
         }
 
 
 # ============================================================
-# HEALTH CHECK
+# 19. HEALTH CHECK
 # ============================================================
 
 @app.get("/health")
 def health():
 
     return {
+
         "status":
             "healthy",
+
+        "application":
+            "Agentic RAG Schedule Assistant",
 
         "model":
             "gemini-3.6-flash",
@@ -1250,7 +1652,13 @@ def health():
             "ChromaDB",
 
         "embedding":
-            "ChromaDB local embedding",
+            "lightweight 128-dimensional local feature hashing",
+
+        "external_embedding_api":
+            False,
+
+        "onnx_model":
+            False,
 
         "rag":
             True,
@@ -1268,7 +1676,7 @@ def health():
 
 
 # ============================================================
-# WEB PAGE
+# 20. WEB INTERFACE
 # ============================================================
 
 @app.get(
@@ -1302,6 +1710,7 @@ Agentic RAG Schedule Assistant
     box-sizing: border-box;
 }
 
+
 body {
 
     margin: 0;
@@ -1314,8 +1723,8 @@ body {
     background:
         linear-gradient(
             135deg,
-            #06182f,
-            #123d69
+            #06172e,
+            #123e6c
         );
 
     min-height: 100vh;
@@ -1359,7 +1768,7 @@ body {
     color: white;
 
     padding:
-        25px 30px;
+        24px 30px;
 }
 
 
@@ -1377,6 +1786,8 @@ body {
         8px 0 0;
 
     opacity: .75;
+
+    font-size: 15px;
 }
 
 
@@ -1426,9 +1837,11 @@ body {
 
     border-radius: 16px;
 
-    line-height: 1.5;
+    line-height: 1.55;
 
     white-space: pre-wrap;
+
+    word-wrap: break-word;
 }
 
 
@@ -1440,6 +1853,10 @@ body {
 
     border:
         1px solid #e2e7ee;
+
+    box-shadow:
+        0 3px 12px
+        rgba(0,0,0,.04);
 }
 
 
@@ -1463,6 +1880,8 @@ body {
 
     border-top:
         1px solid #e1e5eb;
+
+    background: white;
 }
 
 
@@ -1487,6 +1906,10 @@ input {
 input:focus {
 
     border-color: #154f88;
+
+    box-shadow:
+        0 0 0 3px
+        rgba(21,79,136,.08);
 }
 
 
@@ -1542,6 +1965,12 @@ button:disabled {
         max-width: 92%;
     }
 
+
+    .header h1 {
+
+        font-size: 23px;
+    }
+
 }
 
 </style>
@@ -1562,7 +1991,7 @@ Agentic RAG Schedule Assistant
 </h1>
 
 <p>
-Gemini 3.6 Flash • ChromaDB RAG • SQLite
+Gemini 3.6 Flash • ChromaDB Vector RAG • SQLite
 </p>
 
 <div class="status">
@@ -1589,6 +2018,7 @@ Try asking:
 • What workshops do I have coming up?
 • Add a project meeting tomorrow at 3 PM for one hour.
 • Move my project meeting from 3 PM to 4 PM.
+• Delete my project meeting tomorrow.
 
 </div>
 
@@ -1601,6 +2031,8 @@ Try asking:
 
 <input
     id="input"
+    type="text"
+    autocomplete="off"
     placeholder="Ask about your schedule..."
     onkeydown="
         if(event.key === 'Enter') {
@@ -1721,10 +2153,8 @@ async function sendMessage() {
                     body:
                         JSON.stringify(
                             {
-
                                 message:
                                     message
-
                             }
                         )
                 }
@@ -1752,13 +2182,12 @@ async function sendMessage() {
         else {
 
             addMessage(
-                data.response ||
-                "Something went wrong.",
+                data.response
+                || "Something went wrong.",
                 "bot"
             );
 
         }
-
 
     }
 
@@ -1777,6 +2206,7 @@ async function sendMessage() {
     button.disabled =
         false;
 
+
     input.focus();
 }
 
@@ -1791,7 +2221,7 @@ async function sendMessage() {
 
 
 # ============================================================
-# RENDER / LOCAL START
+# 21. RENDER / LOCAL RUN
 # ============================================================
 
 if __name__ == "__main__":
@@ -1805,8 +2235,6 @@ if __name__ == "__main__":
 
     uvicorn.run(
         app,
-        host=
-            "0.0.0.0",
-        port=
-            port
+        host="0.0.0.0",
+        port=port
     )
